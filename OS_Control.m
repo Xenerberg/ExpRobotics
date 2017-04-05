@@ -20,7 +20,11 @@ if clientID > -1
    h_target = Objects_Scene(45);
    h_ee = Objects_Scene(43);
    %Enable the syncrhonous mode
-   vrep.simxSynchronous(clientID,true)
+   vrep.simxSynchronous(clientID,true);
+   %Ensure motors are not running
+   for iCount = 1:6
+      [~] = vrep.simxSetJointTargetVelocity(clientID,h_joints(iCount),0,vrep.simx_opmode_blocking); 
+   end
    
    %Start simulation 
    vrep.simxStartSimulation(clientID,vrep.simx_opmode_blocking);
@@ -43,6 +47,7 @@ if clientID > -1
    q_targ = dcm2quat(g_targ(1:3,1:3)')';
    q_targ = [q_targ(2:4);q_targ(1)];
    pose_g_targ = [g_targ(1:3,4);q_targ];
+   pose_g_targ_vec(:,1) = pose_g_targ;
    
    theta = zeros(6,1);
    g_curr = fn_CreateForwardKinExp(theta,om,q)*g_st_0;
@@ -51,20 +56,35 @@ if clientID > -1
    pose_g = [g_curr(1:3,4);q_g];
    pose_g_vec(:,1) = pose_g;
    
+   g_rest = [0.4;0.4;0.4];
+   Kp_null = .1;
+   f_pos = true;
    
-   
-   theta_des = [pi/3;pi/4;-pi/6;pi/4;pi/3;-pi/4]; %theta_des = [0;pi/4;0;0;0;0];
+   theta_des = [pi/3;pi/4;-pi/6;pi/4;pi/3;-pi/4]; theta_des = [0;0;0;0;0;0];
    theta_dot_des = zeros(6,1);
-   lambda = 1e-3;
-   Kp = 1*[30*eye(3,3),zeros(3,4);zeros(4,3),30*eye(4,4)];
-   Kv = Kp/4;
+   lambda = 1e-5;
+   Kp = [50*eye(3,3),zeros(3,4);zeros(4,3),100*eye(4,4)];
+   if f_pos == true
+      Kp = Kp(1:3,1:3); 
+   end
+   Kv = Kp/8;
    counter = 0;
    max_dq = 1000*ones(6,1);
-   for iCount = 1:6
-      [~] = vrep.simxSetJointTargetVelocity(clientID,h_joints(iCount),0,vrep.simx_opmode_blocking); 
-   end
+   
+   r = 0.35;
+   z = 0.7;
+   pause(0.1);
    while(1)
+       %Run a time-step
+       vrep.simxSynchronousTrigger(clientID);
        counter = counter + 1;
+       %
+       t = counter*0.05;
+       T = 2;
+       pos = [r*sin(t/T);r*cos(t/T);z+counter*1e-4];       
+       [~] = vrep.simxSetObjectPosition(clientID,h_target,-1,pos,vrep.simx_opmode_blocking);
+       
+       
        %Fetch target pose
        [rtrn,ee_targ] = vrep.simxGetObjectPosition(clientID,h_target,-1,vrep.simx_opmode_blocking);
        [rtrn,ee_anglesTarg] = vrep.simxGetObjectOrientation(clientID,h_target,-1,vrep.simx_opmode_blocking);
@@ -73,10 +93,9 @@ if clientID > -1
        q_targ = dcm2quat(g_targ(1:3,1:3)')';
        q_targ = [q_targ(2:4);q_targ(1)];
        pose_g_targ = [g_targ(1:3,4);q_targ];
-       pose_g_targ_vec(:,counter) = pose_g_targ;
+       pose_g_targ_vec(:,counter+1) = pose_g_targ;
        
-       %Run a time-step
-       vrep.simxSynchronousTrigger(clientID); 
+        
        
        %Fetch Joint-space measurements
        for iCount = 1:6
@@ -88,6 +107,14 @@ if clientID > -1
        g_curr = fn_CreateForwardKinExp(q_curr,om,q)*g_st_0;
        q_g = dcm2quat(g_curr(1:3,1:3)')';       
        q_g = [q_g(2:4);q_g(1)];
+       
+       %Fetch the end-effector pose
+       [rtrn,ee_pos] = vrep.simxGetObjectPosition(clientID,h_ee,-1,vrep.simx_opmode_blocking);
+       [rtrn,ee_anglesVREP] = vrep.simxGetObjectOrientation(clientID,h_ee,-1,vrep.simx_opmode_blocking);
+       R = angle2dcm(ee_anglesVREP(1),ee_anglesVREP(2),ee_anglesVREP(3),'XYZ')';       
+       g_curr = [R,ee_pos';zeros(1,3),1];
+       q_g = dcm2quat(g_curr(1:3,1:3)')'; 
+       q_g = [q_g(2:4);q_g(1)];       
        temp = fn_CrossTensor(q_g,0)*[-pose_g_vec(4:6,counter);pose_g_vec(7,counter)];
        if temp(4) < 0
           q_g = -q_g; 
@@ -106,16 +133,36 @@ if clientID > -1
        J_e = J_e(:,1:3);
        %J_e: Representation Jacobian (quaternion)
        J_e = [eye(3,3),zeros(3,3);zeros(4,3),J_e];       
-       J = J_e*[J_1(q_curr'*180/pi),J_2(q_curr'*180/pi),J_3(q_curr'*180/pi),J_4(q_curr'*180/pi),J_5(q_curr'*180/pi),J_6(q_curr'*180/pi)]*180/pi;
-       %J = J_e*fn_Jacobian(q_curr,om,q,4,g_st_0,0);
-       J_star =  J'*inv(J*J' + lambda*eye(7,7));
+       %J = J_e*[J_1(q_curr'*180/pi),J_2(q_curr'*180/pi),J_3(q_curr'*180/pi),J_4(q_curr'*180/pi),J_5(q_curr'*180/pi),J_6(q_curr'*180/pi)]*180/pi;
+       
+       J = J_e*fn_Jacobian(q_curr,om,q,4,g_st_0,0);
+       J = J(1:3,:);
+       
+       J_star =  J'*inv(J*J' + lambda*eye(3,3));
        
        %Compute Task space error
        del_q = q_targ - q_g;       
        del_x(1:3,1) = [pose_g_targ(1:3)- pose_g(1:3)];
        del_x(4:7,1) = del_q(1:4);       
-       del_x_dot = zeros(7,1) - J*dq;
        
+       del_x_des = zeros(7,1);
+             
+       if f_pos == true
+           del_x_dot = zeros(3,1);
+           del_x_des = zeros(3,1);
+           del_x = del_x(1:3);
+       end
+       del_x_des(1:3) = [(1/T)*r*cos(t/T);-(1/T)*r*cos(t/T);1e-4]; 
+       del_x_dot = del_x_des - J*dq;
+       %del_x(4:7) = 0;
+       %del_x_dot(4:7) = 0;
+       %theta_des = q_curr + J_star*del_x_des/0.05;
+       
+       theta_dot_des = J_star*del_x_des;
+       u_null = Kp_null*[theta_des - q_curr]+ sqrt(Kp_null)*(theta_dot_des-dq);
+       if norm(del_x) < 0.1
+           %u_null = 50*ns_vec(:,1);
+       end
        %screw = del_pose_g';
        %theta_dot = J_star*screw;%*pi/180;
        %theta_dot_des = J_star*screw;
@@ -124,27 +171,37 @@ if clientID > -1
        
        %del_theta = theta_des - q_curr;
        %del_theta_dot = theta_dot_des - dq;       
-       
+       %del_x(4:7) = 0;
+       %del_x_dot(4:7) = 0;
        u = Kp*del_x + Kv*del_x_dot; %
+       
        %u = -u;
        %theta_dot = theta_dot + 0.05*u;
        
        
        M = fn_CreateMassMatrix(q_curr,om,q);
        M_ee = J_star'*(M)*J_star;
-       g_q  = fn_ComputeJSg(q_curr,om,q);  
-       g_ee = J_star'*g_q;       
-       %C = fn_ComputeCMat(q_curr,q,om,dq);
+       %M_ee = inv(J*inv(M)*J');
+       g_q  = fn_ComputeJSg(q_curr,om,q);           
+       C = fn_ComputeCMat(q_curr,q,om,dq);
        %C_ee = J_star'*C;
-       C_ee = zeros(7,6);
+       %C_ee = zeros(7,6);
        
-       tau_cmd_os = M_ee*u + C_ee*dq + g_ee;
-       tau_cmd_js = J'*tau_cmd_os;
+       %Weighted pi jacobian       
+       J_inv = (M_ee)*J*inv(M);
+       ns_filter = (eye(6,6) - J'*J_inv);
+       tau_null = u_null;
+       
+       tau_cmd_os = M_ee*u;
+       tau_cmd_js = J'*tau_cmd_os + g_q + M*ns_filter*tau_null +C*dq;
        %tau_cmd = M*u + g_q + C*dq  ;        
        tau_cmd_js = tau_cmd_js.*-1 ;
        
        tau_cmd = tau_cmd_js;
        tau_vect(counter,:) = tau_cmd;
+       
+       
+       
        %tau_cmd = g_q;
        for iCount = 1:6
            if sign(tau_cmd(iCount))*sign(tau(counter,iCount)) < 0
@@ -160,11 +217,14 @@ if clientID > -1
        %end
        
        
-       if counter > 100
+       if counter >400
            break;
        end
    end
-   
+   %Stop the motors from running
+   for iCount = 1:6
+      [~] = vrep.simxSetJointTargetVelocity(clientID,h_joints(iCount),0,vrep.simx_opmode_blocking); 
+   end
    %Stop simulation
    vrep.simxStopSimulation(clientID,vrep.simx_opmode_blocking);
    
@@ -175,7 +235,7 @@ end
 figure;
 for i = 1:6
     subplot(3,2,i)
-    %plot(repmat(theta_des(i),[length(tau),1]),'LineStyle','-.');hold all;grid on;
+    plot(repmat(theta_des(i),[length(tau),1]),'LineStyle','-.');hold all;grid on;
     plot(q_true(:,i));
     ylabel(strcat('$',strcat('\theta_',num2str(i)),'$'),'interpreter','latex');
     xlabel('samples');
